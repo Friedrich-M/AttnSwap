@@ -1,4 +1,7 @@
 import os
+from sched import scheduler
+import sched
+import sys
 import time
 import random
 import argparse
@@ -27,7 +30,7 @@ class TrainOptions:
         self.initialized = False
 
     def initialize(self):
-        self.parser.add_argument('--name', type=str, default='attnswap3',
+        self.parser.add_argument('--name', type=str, default='attnswap8',
                                  help='name of the experiment. It decides where to store samples and models')
         self.parser.add_argument('--gpu_ids', default='0')
         self.parser.add_argument('--checkpoints_dir', type=str,
@@ -69,7 +72,7 @@ class TrainOptions:
         self.parser.add_argument(
             '--lambda_feat', type=float, default=10.0, help='weight for feature matching loss')
         self.parser.add_argument(
-            '--lambda_id', type=float, default=70.0, help='weight for id loss')
+            '--lambda_id', type=float, default=45.0, help='weight for id loss')
         self.parser.add_argument(
             '--lambda_rec', type=float, default=10.0, help='weight for reconstruction loss')
 
@@ -106,29 +109,41 @@ class TrainOptions:
         # save to the disk
         if self.opt.isTrain:
             expr_dir = os.path.join(self.opt.checkpoints_dir, self.opt.name)
-            util.mkdirs(expr_dir)
+            util.mkdirs(expr_dir)  # 创建保存训练log的文件夹
             if save and not self.opt.continue_train:
-                file_name = os.path.join(expr_dir, 'opt.txt')
+                file_name = os.path.join(expr_dir, 'opt.txt')  # 保存训练参数
                 with open(file_name, 'wt') as opt_file:
                     opt_file.write('------------ Options -------------\n')
                     for k, v in sorted(args.items()):
-                        opt_file.write('%s: %s\n' % (str(k), str(v)))
+                        opt_file.write('%s: %s\n' % (str(k), str(v)))  # 保存训练参数
                     opt_file.write('-------------- End ----------------\n')
         return self.opt
+
+
+def lr_func(num_epochs):
+    def func(s):
+        if s < (num_epochs//2):
+            return 1
+        else:
+            return max(0, 1-(2*s-num_epochs)/num_epochs)
+    return func
 
 
 if __name__ == '__main__':
 
     opt = TrainOptions().parse()
-    iter_path = os.path.join(opt.checkpoints_dir, opt.name, 'iter.txt')
+    iter_path = os.path.join(
+        opt.checkpoints_dir, opt.name, 'iter.txt')  # 保存训练的迭代次数
 
-    sample_path = os.path.join(opt.checkpoints_dir, opt.name, 'samples')
+    sample_path = os.path.join(
+        opt.checkpoints_dir, opt.name, 'samples')  # 保存训练的样本
     os.makedirs(sample_path, exist_ok=True)
 
-    log_path = os.path.join(opt.checkpoints_dir, opt.name, 'summary')
+    log_path = os.path.join(opt.checkpoints_dir,
+                            opt.name, 'summary')  # 保存训练的log
     os.makedirs(log_path, exist_ok=True)
 
-    if opt.continue_train:  # 如果继续训练，就加载最新的模型
+    if opt.continue_train:  # 如果继续训练，就加载最新的模型的迭代次数
         try:
             start_epoch, epoch_iter = np.loadtxt(
                 iter_path, delimiter=',', dtype=int)
@@ -148,107 +163,119 @@ if __name__ == '__main__':
 
     #####################################################
     if opt.use_tensorboard:
-        tensorboard_writer = tensorboard.SummaryWriter(log_path) # tensorboard
-        logger = tensorboard_writer #
+        tensorboard_writer = tensorboard.SummaryWriter(log_path)  # tensorboard
+        logger = tensorboard_writer
 
     log_name = os.path.join(opt.checkpoints_dir, opt.name, 'loss_log.txt')
 
     with open(log_name, "a") as log_file:
-        now = time.strftime("%c") # 获取当前时间
+        now = time.strftime("%c")  # 获取当前时间
         log_file.write(
             '================ Training Loss (%s) ================\n' % now)
 
-    optimizer_G, optimizer_D = model.optimizer_G, model.optimizer_D # Generator和Discriminator的优化器
-
+    # Generator和Discriminator的优化器
+    optimizer_G, optimizer_D = model.optimizer_G, model.optimizer_D
+    
     loss_avg = 0
     refresh_count = 0
-    imagenet_std = torch.Tensor([0.229, 0.224, 0.225]).view(3, 1, 1) # imagenet的标准差
-    imagenet_mean = torch.Tensor([0.485, 0.456, 0.406]).view(3, 1, 1) # imagenet的均值
+    imagenet_std = torch.Tensor(
+        [0.229, 0.224, 0.225]).view(3, 1, 1)  # imagenet的标准差
+    imagenet_mean = torch.Tensor(
+        [0.485, 0.456, 0.406]).view(3, 1, 1)  # imagenet的均值
 
-    train_loader = GetLoader(opt.dataset, opt.batchSize, 8, 1234) # 加载数据集
+    train_loader = GetLoader(opt.dataset, opt.batchSize, 8, 1234)  # 加载数据集
 
     randindex = [i for i in range(opt.batchSize)]
-    random.shuffle(randindex) # 打乱数据集
+    random.shuffle(randindex)  # 打乱数据集
 
-    if not opt.continue_train: 
+    if not opt.continue_train:
         start = 0
     else:
         start = int(opt.which_epoch)
-    total_step = opt.total_step # 总共训练多少步
+    total_step = opt.total_step  # 总共训练多少步
     import datetime
     print("Start to train at %s" %
           (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
-    model.netD.feature_network.requires_grad_(False) # 不更新feature network的参数
+    model.netD.feature_network.requires_grad_(False)  # 不更新feature network的参数
 
     # Training Cycle
     for step in range(start, total_step):
-        model.netG.train() 
+        model.netG.train()
         for interval in range(2):
-            random.shuffle(randindex)
-            src_image1, src_image2 = train_loader.next() # 加载数据
+            random.shuffle(randindex)  # 打乱一个batch的数据 batch=16
+            # 加载数据 shape: [batch, 3, 224, 224]
+            src_image1, src_image2 = train_loader.next()  # src_image1为原图，src_image2为风格图
 
             if step % 2 == 0:
-                img_id = src_image2 
+                img_id = src_image2
             else:
-                img_id = src_image2[randindex]
+                img_id = src_image2[randindex]  # 奇数次训练，打乱数据集
 
-            img_id_112 = F.interpolate(img_id, size=(112, 112), mode='bicubic') 
-            latent_id = model.netArc(img_id_112) # 通过ArcFace获取人脸特征
-            latent_id = F.normalize(latent_id, p=2, dim=1) # 归一化
-            if interval:
-                # Content, Style=model.Encoder(src_image1, src_image2)
-                # img_fake        = model.netG(Content, Style)
-                img_fake = model.netG(src_image1, img_id)
-                gen_logits, _ = model.netD(img_fake.detach(), None)
+            # 将src_image1和src_image2 resize到256*256 使用双线性插值
+            # src_image1 = F.interpolate(src_image1, size=(256, 256), mode='bilinear')
+            # src_image2 = F.interpolate(src_image2, size=(256, 256), mode='bilinear')
+
+            # 为了适应arcface的输入尺寸，将图片缩放到112*112 img_id_112: [batch, 3, 112, 112]
+            img_id_112 = F.interpolate(img_id, size=(112, 112), mode='bicubic')
+
+            # 通过ArcFace获取人脸特征 latent_id: [batch, 512]
+            latent_id = model.netArc(img_id_112)
+            latent_id = F.normalize(latent_id, p=2, dim=1)  # 归一化， 使得特征向量的模为1
+            # latent_id.shape: torch.Size([16, 512])
+            # src_image1.shape: torch.Size([16, 3, 224, 224])
+
+            if interval: 
+                # img_fake = model.netG(src_image1, img_id)
+                img_fake = model.netG(src_image1, src_image2) # img_fake为换脸后的图片 [batch, 3, 224, 224]
+                gen_logits, _ = model.netD(img_fake.detach(), None) # gen_logits为生成器生成的图片的判别结果
 
                 loss_Dgen = (F.relu(torch.ones_like(
-                    gen_logits) + gen_logits)).mean()
+                    gen_logits) + gen_logits)).mean() # loss_Dgen为生成器生成的图片的判别结果的loss， 为了让生成器生成的图片被判别器判别为真， loss_Dgen应该越小越好
 
-                real_logits, _ = model.netD(src_image2, None)
+                real_logits, _ = model.netD(src_image2, None) # real_logits为真实图片的判别结果
                 loss_Dreal = (F.relu(torch.ones_like(
-                    real_logits) - real_logits)).mean()
+                    real_logits) - real_logits)).mean() # loss_Dreal为真实图片的判别结果的loss， 其中真实图片的判别结果应该为1， 所以loss_Dreal为1-real_logits
 
-                loss_D = loss_Dgen + loss_Dreal
+                loss_D = loss_Dgen + loss_Dreal # loss_D为判别器的loss， 为了让生成器生成的图片被判别器判别为真， loss_D应该越小越好
                 optimizer_D.zero_grad()
                 loss_D.backward()
                 optimizer_D.step()
             else:
-
-                model.netD.requires_grad_(True)
-                # Content, Style=model.Encoder(src_image1, src_image2)
-                # img_fake = model.netG(Content, Style)
-                img_fake = model.netG(src_image1, img_id)
+                model.netD.requires_grad_(True) # 更新判别器的参数
+                # img_fake = model.netG(src_image1, img_id)
+                img_fake = model.netG(src_image1, src_image2) # img_fake为换脸后的图片 [batch, 3, 224, 224]
                 # G loss
-                gen_logits, feat = model.netD(img_fake, None)
+                gen_logits, feat = model.netD(img_fake, None) # gen_logits为生成器生成的图片的判别结果， feat为生成器生成的图片的特征
 
-                loss_Gmain = (-gen_logits).mean()
-                logger.add_scalar('loss_Gmain', loss_Gmain, step) 
-                
+                loss_Gmain = (-gen_logits).mean() # loss_Gmain为生成器生成的图片的判别结果的loss， 为了让生成器生成的图片被判别器判别为真， loss_Gmain应该越小越好
+
                 img_fake_down = F.interpolate(
-                    img_fake, size=(112, 112), mode='bicubic')
-                latent_fake = model.netArc(img_fake_down)
-                latent_fake = F.normalize(latent_fake, p=2, dim=1)
-                
+                    img_fake, size=(112, 112), mode='bicubic') # img_fake_down为生成器生成的图片缩放到112*112的图片
+                latent_fake = model.netArc(img_fake_down) # latent_fake为生成器生成的图片的人脸特征
+                latent_fake = F.normalize(latent_fake, p=2, dim=1) # 归一化， 使得特征向量的模为1
+
                 loss_G_ID = (
-                    1 - model.cosin_metric(latent_fake, latent_id)).mean()
-                logger.add_scalar('loss_G_ID', loss_G_ID, step) # ID loss
-                
-                real_feat = model.netD.get_feature(src_image1)
+                    1 - model.cosin_metric(latent_fake, latent_id)).mean() # loss_G_ID为生成器生成的图片的人脸特征和风格图的人脸特征的loss， 为了让生成器生成的图片的人脸特征和风格图的人脸特征尽可能的相似， loss_G_ID应该越小越好
+                # loss_G_ID = (
+                #     1 - model.cosin_metric(img_fake, src_image2)).mean()
+                logger.add_scalar('loss_G_ID', loss_G_ID, step)  # ID loss
+
+                real_feat = model.netD.get_feature(src_image1) # real_feat为真实图片的特征
                 feat_match_loss = model.criterionFeat(
-                    feat["3"], real_feat["3"])
-                logger.add_scalar('feat_match_loss', feat_match_loss, step) # 特征匹配损失
-                
+                    feat["3"], real_feat["3"]) # 生成人脸特征和原人脸特征的l1 loss
+                logger.add_scalar('feat_match_loss',
+                                  feat_match_loss, step)  # 特征匹配损失
+
                 loss_G = loss_Gmain + loss_G_ID * opt.lambda_id + \
                     feat_match_loss * opt.lambda_feat
-                
 
                 if step % 2 == 0:
                     # G_Rec
                     loss_G_Rec = model.criterionRec(
-                        img_fake, src_image1) * opt.lambda_rec
-                    logger.add_scalar('loss_G_Rec', loss_G_Rec, step) # 重建损失
-                    loss_G += loss_G_Rec 
+                        img_fake, src_image1) * opt.lambda_rec 
+                    logger.add_scalar('loss_G_Rec', loss_G_Rec, step)  # 重建损失
+                    loss_G += loss_G_Rec
                 logger.add_scalar('loss_G', loss_G, step)
 
                 optimizer_G.zero_grad()

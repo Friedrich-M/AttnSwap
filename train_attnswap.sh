@@ -1,0 +1,1 @@
+python train_attnswap.py --name attnswap_1 --gpu_ids 0 --G_lr 0.008 --D_lr 0.001 --batchSize 16 --lambda_feat 10 --lambda_id 30 --lambda_rec 10 --phase train --use_tensorboard
