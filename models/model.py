@@ -5,6 +5,9 @@ import torch
 from models.base_model import BaseModel
 from models.Generator import Generator_AttnSwap
 from models.Discriminator import Discriminator_AttnSwap
+from argparse import Namespace
+from models.psp import pSp
+from models.id_loss import IDLoss
 
 
 def compute_grad2(d_out, x_in): 
@@ -25,26 +28,16 @@ class fsModel(BaseModel):
 
     def initialize(self, opt):
         BaseModel.initialize(self, opt)
-        # if opt.resize_or_crop != 'none' or not opt.isTrain:  # when training at full res this causes OOM
         self.isTrain = opt.isTrain
 
         # Generator network 生成器
-        self.netG = Generator_AttnSwap(opt)
+        self.netG = Generator_AttnSwap()
         self.netG.cuda()
+        self.netG.net.requires_grad_(False)
 
         # Id network 身份信息提取网络
-        netArc_checkpoint = opt.Arc_path
-        netArc_checkpoint = torch.load(
-            netArc_checkpoint, map_location=torch.device("cpu")) # 读取模型
-        self.netArc = netArc_checkpoint['model'].module 
-        self.netArc = self.netArc.cuda() # 用于提取特征
-        self.netArc.eval() # 设置为评估模式，不启用 BatchNormalization 和 Dropout
-        self.netArc.requires_grad_(False) # 不计算梯度， 不更新参数
+        self.id_loss = IDLoss().cuda().eval()
         
-        if not self.isTrain:
-            pretrained_path = opt.checkpoints_dir
-            self.load_network(self.netG, 'G', opt.which_epoch, pretrained_path)
-            return
         self.netD = Discriminator_AttnSwap(
             diffaug=False, interp224=False, **{})
         # self.netD.feature_network.requires_grad_(False)
@@ -79,7 +72,7 @@ class fsModel(BaseModel):
         torch.cuda.empty_cache()
 
     def cosin_metric(self, x1, x2):
-        # return np.dot(x1, x2) / (np.linalg.norm(x1) * np.linalg.norm(x2))
+        # return np.dot(x1, x2) / (np.linalg.norm(x1) * np.linalg.norm(x2))  
         return torch.sum(x1 * x2, dim=1) / (torch.norm(x1, dim=1) * torch.norm(x2, dim=1))
 
     def save(self, which_epoch):

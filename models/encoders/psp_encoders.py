@@ -1,12 +1,11 @@
-from stylegan2.model import EqualLinear
-from encoders.helpers import get_blocks, Flatten, bottleneck_IR, bottleneck_IR_SE
-import numpy as np
-import torch
-import torch.nn.functional as F
-from torch import nn
-from torch.nn import Linear, Conv2d, BatchNorm2d, PReLU, Sequential, Module
 import math
-
+from torch.nn import Linear, Conv2d, BatchNorm2d, PReLU, Sequential, Module
+from torch import nn
+import torch.nn.functional as F
+import torch
+import numpy as np
+from encoders.helpers import get_blocks, Flatten, bottleneck_IR, bottleneck_IR_SE
+from stylegan2.model import EqualLinear
 import sys
 import os
 dir = os.path.abspath(os.path.dirname(__file__))
@@ -29,6 +28,8 @@ class GradualStyleBlock(Module):
         modules = []
         modules += [Conv2d(in_c, out_c, kernel_size=3, stride=2, padding=1),
                     nn.LeakyReLU()]
+        # H = (H_in - kernel_size + 2 * padding + stride) / stride = (H_in - 3 + 2 * 1 + 2) / 2 = H_in / 2
+        # W = (W_in - kernel_size + 2 * padding + stride) / stride = (W_in - 3 + 2 * 1 + 2) / 2 = W_in / 2
         for i in range(num_pools - 1):
             modules += [
                 Conv2d(out_c, out_c, kernel_size=3, stride=2, padding=1),
@@ -45,10 +46,17 @@ class GradualStyleBlock(Module):
 
 
 class GradualStyleEncoder(Module):
+    """
+    The mapping network, map2style, is a small fully convolutional network, 
+    which gradually reduces spatial size using a set of 2-strided convolutions followed by LeakyReLU activations. 
+    Each generated 512 vector, is fed into StyleGAN, starting from its matching afﬁne transformation, A.
+    """
+
     def __init__(self, num_layers, mode='ir', opts=None):
-        self.input_nc = 3
-        self.output_size = 512
-        self.n_styles = int(math.log(self.output_size, 2)) * 2 - 2
+        self.input_nc = 3  # 输入的通道数
+        self.output_size = 1024  # 输出图像的resolution大小
+        self.n_styles = int(math.log(self.output_size, 2)) * \
+            2 - 2  # 根据生成图像的分辨率确定生成的特征向量的个数
         super(GradualStyleEncoder, self).__init__()
         assert num_layers in [
             50, 100, 152], 'num_layers should be 50,100, or 152'  # 表示使用的是resnet50，100，152
@@ -71,7 +79,7 @@ class GradualStyleEncoder(Module):
         self.body = Sequential(*modules)  # 将残差网络添加到Sequential中
 
         self.styles = nn.ModuleList()  # 用于存储风格编码器
-        self.style_count = self.n_styles  # 风格编码器的个数
+        self.style_count = self.n_styles  # 特征向量的个数
         self.coarse_ind = 3  # 粗编码器的位置
         self.middle_ind = 7  # 中编码器的位置
         for i in range(self.style_count):
@@ -107,34 +115,39 @@ class GradualStyleEncoder(Module):
         # 上采样后与侧向特征图相加
         return F.interpolate(x, size=(H, W), mode='bilinear', align_corners=True) + y
 
-    def forward(self, x):
-        x = self.input_layer(x)  # 输入层
-
+    def forward(self, x=None, c1=None, c2=None, c3=None):
         latents = []
-        modulelist = list(self.body._modules.values())  # 获取body中的所有模块
-        for i, l in enumerate(modulelist):
-            x = l(x)
-            if i == 6:
-                c1 = x  # 保存第一个侧向特征图
-            elif i == 20:
-                c2 = x  # 保存第二个侧向特征图
-            elif i == 23:
-                c3 = x  # 保存第三个侧向特征图
+        if x is not None: # 如果输入的是图像，则返回三个特征图
+            x = self.input_layer(x)  # 输入层
 
-        for j in range(self.coarse_ind):
-            latents.append(self.styles[j](c3))  # 将第三个侧向特征图输入到前三个风格编码器中
+            # 1. Feature maps are ﬁrst extracted using a standard feature pyramid over a ResNet backbone
+            modulelist = list(self.body._modules.values())
+            # 2. For each of the 18 target styles, a small mapping network is trained to extract the learned styles from the corresponding feature map
+            for i, l in enumerate(modulelist):
+                x = l(x)
+                if i == 6:
+                    c1 = x  # 保存第一个特征图
+                elif i == 20:
+                    c2 = x  # 保存第二个特征图
+                elif i == 23:
+                    c3 = x  # 保存第三个特征图
 
-        p2 = self._upsample_add(c3, self.latlayer1(c2))  # 将第三个侧向特征图与第二个侧向特征图相加
-        for j in range(self.coarse_ind, self.middle_ind):
-            latents.append(self.styles[j](p2))  # 将相加后的特征图输入到中间三个风格编码器中
+            return c1, c2, c3
 
-        p1 = self._upsample_add(p2, self.latlayer2(c1))  # 将相加后的特征图与第一个侧向特征图相加
-        for j in range(self.middle_ind, self.style_count):
-            latents.append(self.styles[j](p1))  # 将相加后的特征图输入到后面的风格编码器中
+        else: # 如果输入的是特征图，则返回风格编码器的输出
+            # styles (0-2) are generated from the small feature map
+            for j in range(self.coarse_ind):
+                latents.append(self.styles[j](c3))  # 将第三个特征图输入到前三个风格编码器中
 
-        out = torch.stack(latents, dim=1)  # 将风格编码器的输出拼接在一起
-        return out
+            # styles (3-6) are generated from the medium feature map
+            p2 = self._upsample_add(c3, self.latlayer1(c2))
+            for j in range(self.coarse_ind, self.middle_ind):
+                latents.append(self.styles[j](p2))  # 将相加后的特征图输入到中间三个风格编码器中
 
+            # styles (7-18) are generated from the largest feature map
+            p1 = self._upsample_add(p2, self.latlayer2(c1))
+            for j in range(self.middle_ind, self.style_count):
+                latents.append(self.styles[j](p1))  # 将相加后的特征图输入到后面的风格编码器中
 
-# 输出网络输出的维度
-print(GradualStyleEncoder(50, 'ir_se')(torch.randn(16, 3, 214, 214)).shape)
+            out = torch.stack(latents, dim=1)  # 将风格编码器的输出拼接在一起
+            return out

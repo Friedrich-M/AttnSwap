@@ -1,22 +1,30 @@
+from data.data_loader_Swapping import tensor2im
+from data.data_loader_Swapping import GetLoader
+from models.model import fsModel
+from util.plot import plot_batch
+from util import util
+import torch.utils.tensorboard as tensorboard
+from torch.backends import cudnn
+import torch.nn.functional as F
+import torch
 import os
 from sched import scheduler
-import sched
 import sys
 import time
 import random
 import argparse
 import numpy as np
+from copy import deepcopy
+from PIL import Image
 
-import torch
-import torch.nn.functional as F
-from torch.backends import cudnn
-import torch.utils.tensorboard as tensorboard
-
-from util import util
-from util.plot import plot_batch
-from models.model import fsModel
-from data.data_loader_Swapping import GetLoader
+from argparse import Namespace
+from models.psp import pSp
+from torchvision import transforms
+from PIL import Image
 import warnings
+warnings.filterwarnings("ignore")
+
+
 warnings.filterwarnings("ignore")
 
 
@@ -30,7 +38,7 @@ class TrainOptions:
         self.initialized = False
 
     def initialize(self):
-        self.parser.add_argument('--name', type=str, default='attnswap8',
+        self.parser.add_argument('--name', type=str, default='attnswap_1',
                                  help='name of the experiment. It decides where to store samples and models')
         self.parser.add_argument('--gpu_ids', default='0')
         self.parser.add_argument('--checkpoints_dir', type=str,
@@ -39,7 +47,7 @@ class TrainOptions:
 
         # input/output sizes
         self.parser.add_argument(
-            '--batchSize', type=int, default=16, help='input batch size')  # batch size
+            '--batchSize', type=int, default=8, help='input batch size')  # batch size
 
         # for displays
         self.parser.add_argument(
@@ -47,7 +55,7 @@ class TrainOptions:
 
         # for trainingss
         self.parser.add_argument(
-            '--dataset', type=str, default="./vggface2_crop_arcfacealign_224", help='path to he face swapping dataset')  # path to the face swapping dataset
+            '--dataset', type=str, default="./data_psp/celeba-256", help='path to he face swapping dataset')  # path to the face swapping dataset
         self.parser.add_argument('--continue_train', type=str2bool,
                                  default='False', help='continue training: load the latest model')
         self.parser.add_argument('--load_pretrain', type=str, default='./checkpoints/simswap224_test',
@@ -72,16 +80,18 @@ class TrainOptions:
         self.parser.add_argument(
             '--lambda_feat', type=float, default=10.0, help='weight for feature matching loss')
         self.parser.add_argument(
-            '--lambda_id', type=float, default=45.0, help='weight for id loss')
+            '--lambda_id', type=float, default=30.0, help='weight for id loss')
         self.parser.add_argument(
             '--lambda_rec', type=float, default=10.0, help='weight for reconstruction loss')
 
         self.parser.add_argument(
             "--Arc_path", type=str, default='./arcface_model/arcface_checkpoint.tar', help="run ONNX model via TRT")
         self.parser.add_argument(
+            "--PSP_path", type=str, default='./psp_model/psp_ffhq_encode.pt', help='the pretrained psp model')
+        self.parser.add_argument(
             "--total_step", type=int, default=1000000, help='total training step')
         self.parser.add_argument(
-            "--log_frep", type=int, default=200, help='frequence for printing log information')
+            "--log_frep", type=int, default=20, help='frequence for printing log information')
         self.parser.add_argument(
             "--sample_freq", type=int, default=1000, help='frequence for sampling')
         self.parser.add_argument(
@@ -154,7 +164,7 @@ if __name__ == '__main__':
     else:
         start_epoch, epoch_iter = 1, 0
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(opt.gpu_ids)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(opt.gpu_ids)  # 设置GPU
     print("GPU used : ", str(opt.gpu_ids))
 
     cudnn.benchmark = True
@@ -175,13 +185,9 @@ if __name__ == '__main__':
 
     # Generator和Discriminator的优化器
     optimizer_G, optimizer_D = model.optimizer_G, model.optimizer_D
-    
+
     loss_avg = 0
     refresh_count = 0
-    imagenet_std = torch.Tensor(
-        [0.229, 0.224, 0.225]).view(3, 1, 1)  # imagenet的标准差
-    imagenet_mean = torch.Tensor(
-        [0.485, 0.456, 0.406]).view(3, 1, 1)  # imagenet的均值
 
     train_loader = GetLoader(opt.dataset, opt.batchSize, 8, 1234)  # 加载数据集
 
@@ -201,69 +207,59 @@ if __name__ == '__main__':
 
     # Training Cycle
     for step in range(start, total_step):
-        model.netG.train()
+        model.netG.net.eval()
+        model.netG.sanet1.train()
+        model.netG.sanet2.train()
+        model.netG.sanet3.train()
+        model.netG.net.requires_grad_(False)
         for interval in range(2):
             random.shuffle(randindex)  # 打乱一个batch的数据 batch=16
             # 加载数据 shape: [batch, 3, 224, 224]
-            src_image1, src_image2 = train_loader.next()  # src_image1为原图，src_image2为风格图
+            src_image = train_loader.next()  # src_image1为原图，src_image2为风格图
+            src_image1, src_image2 = deepcopy(src_image), deepcopy(src_image)
 
             if step % 2 == 0:
-                img_id = src_image2
+                img_id = src_image2  # 偶数次训练，重建原图
             else:
                 img_id = src_image2[randindex]  # 奇数次训练，打乱数据集
 
-            # 将src_image1和src_image2 resize到256*256 使用双线性插值
-            # src_image1 = F.interpolate(src_image1, size=(256, 256), mode='bilinear')
-            # src_image2 = F.interpolate(src_image2, size=(256, 256), mode='bilinear')
-
-            # 为了适应arcface的输入尺寸，将图片缩放到112*112 img_id_112: [batch, 3, 112, 112]
-            img_id_112 = F.interpolate(img_id, size=(112, 112), mode='bicubic')
-
-            # 通过ArcFace获取人脸特征 latent_id: [batch, 512]
-            latent_id = model.netArc(img_id_112)
-            latent_id = F.normalize(latent_id, p=2, dim=1)  # 归一化， 使得特征向量的模为1
-            # latent_id.shape: torch.Size([16, 512])
-            # src_image1.shape: torch.Size([16, 3, 224, 224])
-
-            if interval: 
-                # img_fake = model.netG(src_image1, img_id)
-                img_fake = model.netG(src_image1, src_image2) # img_fake为换脸后的图片 [batch, 3, 224, 224]
-                gen_logits, _ = model.netD(img_fake.detach(), None) # gen_logits为生成器生成的图片的判别结果
+            if interval:
+                # img_fake为换脸后的图片 [batch, 3, 224, 224]
+                img_fake = model.netG(src_image1, img_id)
+                # gen_logits为生成器生成的图片的判别结果
+                gen_logits, _ = model.netD(img_fake.detach(), None)
 
                 loss_Dgen = (F.relu(torch.ones_like(
-                    gen_logits) + gen_logits)).mean() # loss_Dgen为生成器生成的图片的判别结果的loss， 为了让生成器生成的图片被判别器判别为真， loss_Dgen应该越小越好
+                    gen_logits) + gen_logits)).mean()  # loss_Dgen为生成器生成的图片的判别结果的loss， 为了让生成器生成的图片被判别器判别为真， loss_Dgen应该越小越好
 
-                real_logits, _ = model.netD(src_image2, None) # real_logits为真实图片的判别结果
+                real_logits, _ = model.netD(
+                    src_image2, None)  # real_logits为真实图片的判别结果
                 loss_Dreal = (F.relu(torch.ones_like(
-                    real_logits) - real_logits)).mean() # loss_Dreal为真实图片的判别结果的loss， 其中真实图片的判别结果应该为1， 所以loss_Dreal为1-real_logits
+                    real_logits) - real_logits)).mean()  # loss_Dreal为真实图片的判别结果的loss， 其中真实图片的判别结果应该为1， 所以loss_Dreal为1-real_logits
 
-                loss_D = loss_Dgen + loss_Dreal # loss_D为判别器的loss， 为了让生成器生成的图片被判别器判别为真， loss_D应该越小越好
+                # loss_D为判别器的loss， 为了让生成器生成的图片被判别器判别为真， loss_D应该越小越好
+                loss_D = loss_Dgen + loss_Dreal
                 optimizer_D.zero_grad()
                 loss_D.backward()
                 optimizer_D.step()
             else:
-                model.netD.requires_grad_(True) # 更新判别器的参数
-                # img_fake = model.netG(src_image1, img_id)
-                img_fake = model.netG(src_image1, src_image2) # img_fake为换脸后的图片 [batch, 3, 224, 224]
+                model.netD.requires_grad_(True)  # 更新判别器的参数
+                img_fake = model.netG(src_image1, img_id)
+
                 # G loss
-                gen_logits, feat = model.netD(img_fake, None) # gen_logits为生成器生成的图片的判别结果， feat为生成器生成的图片的特征
+                # gen_logits为生成器生成的图片的判别结果， feat为生成器生成的图片的特征
+                gen_logits, feat = model.netD(img_fake, None)
 
-                loss_Gmain = (-gen_logits).mean() # loss_Gmain为生成器生成的图片的判别结果的loss， 为了让生成器生成的图片被判别器判别为真， loss_Gmain应该越小越好
+                loss_Gmain = (-gen_logits).mean()
 
-                img_fake_down = F.interpolate(
-                    img_fake, size=(112, 112), mode='bicubic') # img_fake_down为生成器生成的图片缩放到112*112的图片
-                latent_fake = model.netArc(img_fake_down) # latent_fake为生成器生成的图片的人脸特征
-                latent_fake = F.normalize(latent_fake, p=2, dim=1) # 归一化， 使得特征向量的模为1
+                loss_G_ID, _, _ = model.id_loss(img_fake, img_id, src_image1)
+                if step % 2 == 1:
+                    logger.add_scalar('loss_G_ID', loss_G_ID, step)  # ID loss
 
-                loss_G_ID = (
-                    1 - model.cosin_metric(latent_fake, latent_id)).mean() # loss_G_ID为生成器生成的图片的人脸特征和风格图的人脸特征的loss， 为了让生成器生成的图片的人脸特征和风格图的人脸特征尽可能的相似， loss_G_ID应该越小越好
-                # loss_G_ID = (
-                #     1 - model.cosin_metric(img_fake, src_image2)).mean()
-                logger.add_scalar('loss_G_ID', loss_G_ID, step)  # ID loss
-
-                real_feat = model.netD.get_feature(src_image1) # real_feat为真实图片的特征
+                real_feat = model.netD.get_feature(
+                    src_image1)  # real_feat为真实图片的特征
                 feat_match_loss = model.criterionFeat(
-                    feat["3"], real_feat["3"]) # 生成人脸特征和原人脸特征的l1 loss
+                    feat["3"], real_feat["3"])  # 生成人脸特征和原人脸特征的l1 loss
                 logger.add_scalar('feat_match_loss',
                                   feat_match_loss, step)  # 特征匹配损失
 
@@ -273,7 +269,7 @@ if __name__ == '__main__':
                 if step % 2 == 0:
                     # G_Rec
                     loss_G_Rec = model.criterionRec(
-                        img_fake, src_image1) * opt.lambda_rec 
+                        img_fake, src_image1) * opt.lambda_rec
                     logger.add_scalar('loss_G_Rec', loss_G_Rec, step)  # 重建损失
                     loss_G += loss_G_Rec
                 logger.add_scalar('loss_G', loss_G, step)
@@ -304,7 +300,7 @@ if __name__ == '__main__':
                 message += '%s: %.3f ' % (k, v)
 
             print(message)
-            print(model.netG.transform.sanet.gamma)
+            # print(model.netG.transform.sanet.gamma)
             with open(log_name, "a") as log_file:
                 log_file.write('%s\n' % message)
 
@@ -315,33 +311,28 @@ if __name__ == '__main__':
                 imgs = list()
                 zero_img = (torch.zeros_like(src_image1[0, ...]))
                 imgs.append(zero_img.cpu().numpy())
-                save_img = ((src_image1.cpu()) *
-                            imagenet_std + imagenet_mean).numpy()
-                save_img2 = ((src_image2.cpu()) *
-                             imagenet_std + imagenet_mean).numpy()
+                save_img = src_image1
+                save_img2 = src_image2
                 for r in range(opt.batchSize):
-                    imgs.append(save_img[r, ...])
-                # arcface_112     = F.interpolate(src_image2,size=(112,112), mode='bicubic')
-                # id_vector_src1  = model.netArc(arcface_112)
-                # id_vector_src1  = F.normalize(id_vector_src1, p=2, dim=1)
+                    imgs.append(tensor2im(save_img[r, ...]))
 
                 for i in range(opt.batchSize):
 
-                    imgs.append(save_img[i, ...])
+                    imgs.append(tensor2im(save_img[i, ...]))
                     image_infer = src_image1[i, ...].repeat(
                         opt.batchSize, 1, 1, 1)
                     # Content, Style=model.Encoder(image_infer, src_image2)
                     # img_fake        = model.netG(Content, Style).cpu()
 
-                    img_fake = model.netG(image_infer, src_image2).cpu()
+                    img_fake = model.netG(image_infer, src_image2)
 
-                    img_fake = img_fake * imagenet_std
-                    img_fake = img_fake + imagenet_mean
-                    img_fake = img_fake.numpy()
                     for j in range(opt.batchSize):
-                        imgs.append(img_fake[j, ...])
-                print("Save test data")
+                        imgs.append(tensor2im(img_fake[j, ...]))
+                # print("Save test data")
                 imgs = np.stack(imgs, axis=0).transpose(0, 2, 3, 1)
+                print("Save test data which has {} images".format(
+                    imgs.shape[0]))
+
                 plot_batch(imgs, os.path.join(
                     sample_path, 'step_'+str(step+1)+'.jpg'))
 

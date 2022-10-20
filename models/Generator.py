@@ -4,6 +4,10 @@ import torch.nn as nn
 import torch
 import sys
 import os
+from argparse import Namespace
+from models.psp import pSp
+from models.stylegan2.model import Generator
+from models.encoders import psp_encoders
 dir = os.path.abspath(os.path.dirname(__file__))
 Attn_dir = os.path.abspath(os.path.join(dir, '../'))
 sys.path.append(dir)
@@ -14,6 +18,14 @@ sys.path.append(os.path.abspath(os.path.join(dir, 'data')))
 
 from encoders.psp_encoders import GradualStyleEncoder
 from stylegan2.model import Generator
+
+def get_keys(d, name):
+    if 'state_dict' in d:
+        d = d['state_dict']
+    d_filt = {k[len(name) + 1:]: v for k, v in d.items()
+              if k[:len(name)] == name}
+    return d_filt
+
 
 def calc_mean_std(feat, eps=1e-5):
     # eps is a small value added to the variance to avoid divide-by-zero.
@@ -161,42 +173,31 @@ class ResBlock(nn.Module):
 
 
 class Generator_AttnSwap(nn.Module):
-    def __init__(self, opt):
+    def __init__(self):
         super(Generator_AttnSwap, self).__init__()
-        self.encoder_psp = GradualStyleEncoder(50, 'ir_se')  # psp encoder
-        self.decoder_psp = Generator(512, 512, 8) # psp decoder
-        self.encoder_p2p = encoder # p2p encoder
-        self.decoder_p2p = decoder # p2p decoder
-        self.transform = Transform(in_planes=512) # sanet transform -- mix style and content
-        self.resblock = ResBlock(in_size=512, hidden_size=512, out_size=512)
-        self.face_pool = torch.nn.AdaptiveAvgPool2d((224, 224)) # 将图片resize到224*224
-        self.resblock.cuda()
-        self.transform.cuda()
-        self.encoder_psp.cuda()
-        self.decoder_psp.cuda()
-        self.encoder_p2p.cuda()
-        self.decoder_p2p.cuda()
-        
+        ckpt = torch.load('./psp_model/psp_ffhq_encode.pt', map_location='cpu')
+        print('load psp model success')
+        opts = ckpt['opts']
+        opts['checkpoint_path'] = './psp_model/psp_ffhq_encode.pt'
+        opts['output_size'] = 1024
+        opts['learn_in_w'] = False
+        opts = Namespace(**opts)
+        opts.n_styles = int(math.log(opts.output_size, 2)) * 2 - 2
+        # PSP encoder
+        self.net = pSp(opts)
+        self.net.cuda()
+        # SANet model
+        self.sanet1 = SANet(in_planes=128)
+        self.sanet2 = SANet(in_planes=256)
+        self.sanet3 = SANet(in_planes=512)
+        self.sanet1.cuda()
+        self.sanet2.cuda()
+        self.sanet3.cuda()
 
-    def forward(self, tgt_img, src_img, resize=True):
-        # tgt_img src_img shape: (16 * 3 * 224 * 224)
-        Content = self.encoder_psp(tgt_img)
-        Style = self.encoder_psp(src_img)
-        # # Content shape: (16 * 16 * 512)
-        # Content = Content.permute(2, 0, 1).unsqueeze(0)
-        # Style = Style.permute(2, 0, 1).unsqueeze(0)
-        # # Content shape: (1 * 512 * 16 * 16)
-        # Content = self.resblock(Content)
-        # Style = self.resblock(Style)
-        # # Content shape: (1 * 512 * 16 * 16)
-        # out = self.transform(Content, Style) # sanet transform
-        # # out shape: (1 * 512 * 16 * 16)
-        # result = out.squeeze(0).permute(1, 2, 0)
-        # # result shape: (16 * 16 * 512)
-        result = Content + Style
-        images, result_latent = self.decoder_psp(result)
-        if resize:
-            images = self.face_pool(images)
-        # images shape: (16 * 3 * 224 * 224)
-            
-        return images
+    def forward(self, tgt_img, src_img):
+        tgt_feature_map1, tgt_feature_map2, tgt_feature_map3 = self.net(x=tgt_img)
+        src_feature_map1, src_feature_map2, src_feature_map3 = self.net(x=src_img)
+        c1 = self.sanet1(tgt_feature_map1, src_feature_map1)
+        c2 = self.sanet2(tgt_feature_map2, src_feature_map2)
+        c3 = self.sanet3(tgt_feature_map3, src_feature_map3)
+        return self.net(x=None, c1=c1, c2=c2, c3=c3)

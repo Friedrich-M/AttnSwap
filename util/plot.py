@@ -5,7 +5,7 @@ import PIL
 def postprocess(x):
     """[0,1] to uint8."""
     
-    x = np.clip(255 * x, 0, 255)
+    # x = np.clip(255 * x, 0, 255)
     x = np.cast[np.uint8](x)
     return x
 

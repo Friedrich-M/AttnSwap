@@ -1,7 +1,6 @@
 """
 This file defines the core research contribution
 """
-from configs.paths_config import model_paths
 from models.stylegan2.model import Generator
 from models.encoders import psp_encoders
 from torch import nn
@@ -20,32 +19,17 @@ def get_keys(d, name):
 
 
 class pSp(nn.Module):
-
     def __init__(self, opts):
         super(pSp, self).__init__()
         self.set_opts(opts)
         # compute number of style inputs based on the output resolution
         self.opts.n_styles = int(math.log(self.opts.output_size, 2)) * 2 - 2
         # Define architecture
-        self.encoder = self.set_encoder() # 选择编码器的类型
-        self.decoder = Generator(self.opts.output_size, 512, 8) # 解码器
-        self.face_pool = torch.nn.AdaptiveAvgPool2d((256, 256)) # 将图片resize到256*256
-        # Load weights if needed
+        self.encoder = psp_encoders.GradualStyleEncoder(50, 'ir_se', self.opts)
+        self.decoder = Generator(self.opts.output_size, 512, 8)  # 解码器
+        self.face_pool = torch.nn.AdaptiveAvgPool2d(
+            (256, 256))  # 将图片resize到256*256
         self.load_weights()
-
-    def set_encoder(self):
-        if self.opts.encoder_type == 'GradualStyleEncoder':
-            encoder = psp_encoders.GradualStyleEncoder(50, 'ir_se', self.opts)
-        elif self.opts.encoder_type == 'BackboneEncoderUsingLastLayerIntoW':
-            encoder = psp_encoders.BackboneEncoderUsingLastLayerIntoW(
-                50, 'ir_se', self.opts)
-        elif self.opts.encoder_type == 'BackboneEncoderUsingLastLayerIntoWPlus':
-            encoder = psp_encoders.BackboneEncoderUsingLastLayerIntoWPlus(
-                50, 'ir_se', self.opts)
-        else:
-            raise Exception('{} is not a valid encoders'.format(
-                self.opts.encoder_type))
-        return encoder
 
     def load_weights(self):
         if self.opts.checkpoint_path is not None:
@@ -57,28 +41,14 @@ class pSp(nn.Module):
             self.decoder.load_state_dict(
                 get_keys(ckpt, 'decoder'), strict=True)
             self.__load_latent_avg(ckpt)
-        else:
-            print('Loading encoders weights from irse50!')
-            encoder_ckpt = torch.load(model_paths['ir_se50'])
-            # if input to encoder is not an RGB image, do not load the input layer weights
-            if self.opts.label_nc != 0:
-                encoder_ckpt = {
-                    k: v for k, v in encoder_ckpt.items() if "input_layer" not in k}
-            self.encoder.load_state_dict(encoder_ckpt, strict=False)
-            print('Loading decoder weights from pretrained!')
-            ckpt = torch.load(self.opts.stylegan_weights)
-            self.decoder.load_state_dict(ckpt['g_ema'], strict=False)
-            if self.opts.learn_in_w:
-                self.__load_latent_avg(ckpt, repeat=1)
-            else:
-                self.__load_latent_avg(ckpt, repeat=self.opts.n_styles)
 
-    def forward(self, x, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
+    def forward(self, x=None, c1=None, c2=None, c3=None, resize=True, latent_mask=None, input_code=False, randomize_noise=False,
                 inject_latent=None, return_latents=False, alpha=None):
-        if input_code:
-            codes = x
+        if x is not None:
+            map1, map2, map3 = self.encoder(x=x, c1=None, c2=None, c3=None)
+            return map1, map2, map3
         else:
-            codes = self.encoder(x)
+            codes = self.encoder(x=None, c1=c1, c2=c2, c3=c3)  # 输出的特征向量
             # normalize with respect to the center of an average face
             if self.opts.start_from_latent_avg:
                 if self.opts.learn_in_w:
