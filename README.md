@@ -41,3 +41,8 @@ sh train_attnswap.sh
 There are many options you can specify. Please use `python train_attnswap.py --help`. The specified options are printed to the console. To specify the number of GPUs to utilize, use `--gpu_ids`. If you want to use the second and third GPUs for example, use `--gpu_ids 1,2`.
 
 To log training, use `--use_tensorboard` for Tensorboard. The logs are stored at `[checkpoints]/[name]/`.
+
+## Current progress
+![step_13000](https://user-images.githubusercontent.com/85838942/197010181-b80b9659-34bc-4223-9feb-4542e4f636e4.jpg)
+
+
