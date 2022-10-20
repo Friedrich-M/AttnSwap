@@ -1,6 +1,8 @@
 [![License mit](https://img.shields.io/badge/license-mit-blue.svg)](https://raw.githubusercontent.com/nvlabs/SPADE/master/LICENSE.md)
 ![Python 3.8](https://img.shields.io/badge/python-3.8-green.svg)
 # High Fidelity FaceShift Model Based on Attention 
+<img width="700" alt="image" src="https://user-images.githubusercontent.com/85838942/197038914-7c54016f-6aa9-4df9-af4f-0211029ac8da.jpg">
+
 ## Installation
 
 Clone this repo.
@@ -10,9 +12,9 @@ cd AttnSwap/
 ```
 
 ## Dataset Preparation
-High Resolution Dataset [VGGFace2-HQ](https://github.com/NNNNAI/VGGFace2-HQ)
+High Resolution Dataset Celeba-256
 ```
-mkdir vggface2_crop_arcfacealign_224
+mkdir data_psp
 ```
 Put the downloaded dataset under this folder
 
@@ -20,17 +22,14 @@ Put the downloaded dataset under this folder
 
 Once the dataset is ready, the result images can be generated using pretrained models.
 
-Download arcface_checkpoint.tar from SimSwap and put it under the arcface_model folder
+Download **CurricularFace_Backbone.pth** and put it under the arcface_psp_model folder
 ```
-mkdir arcface_model
-cd arcface_model
-tar xvf arcface_checkpoint.tar
-cd ../
+mkdir arcface_psp_model
 ```
 
-Download vgg_normalised.pth from the SAnet and put it under the vggface2_crop_arcfacealign_224 folder
+Download psp_ffhq_encode.pt from the PSP and put it under the psp_model folder
 ```
-mkdir vggface2_crop_arcfacealign_224
+mkdir psp_model
 ```
 
 ## Training New Models
@@ -43,6 +42,7 @@ There are many options you can specify. Please use `python train_attnswap.py --h
 To log training, use `--use_tensorboard` for Tensorboard. The logs are stored at `[checkpoints]/[name]/`.
 
 ## Current progress
-![step_13000](https://user-images.githubusercontent.com/85838942/197010181-b80b9659-34bc-4223-9feb-4542e4f636e4.jpg)
+![step_20000](https://user-images.githubusercontent.com/85838942/197038895-fcfb8cb3-8503-4082-bcda-8b4d1ba4bd13.jpg)
+
 
 
