@@ -1,7 +1,7 @@
 [![License mit](https://img.shields.io/badge/license-mit-blue.svg)](https://raw.githubusercontent.com/nvlabs/SPADE/master/LICENSE.md)
 ![Python 3.8](https://img.shields.io/badge/python-3.8-green.svg)
 # High Fidelity FaceShift Model Based on Attention 
-<img width="700" alt="image" src="https://user-images.githubusercontent.com/85838942/197038914-7c54016f-6aa9-4df9-af4f-0211029ac8da.jpg">
+<img width="700" alt="image" src="https://user-images.githubusercontent.com/85838942/197096449-66fb5bad-39d1-4e59-a096-0934be14e446.jpg">
 
 ## Installation
 
@@ -42,7 +42,7 @@ There are many options you can specify. Please use `python train_attnswap.py --h
 To log training, use `--use_tensorboard` for Tensorboard. The logs are stored at `[checkpoints]/[name]/`.
 
 ## Current progress
-![step_20000](https://user-images.githubusercontent.com/85838942/197038895-fcfb8cb3-8503-4082-bcda-8b4d1ba4bd13.jpg)
+![step_41000](https://user-images.githubusercontent.com/85838942/197097112-4b2fd716-7ec5-4b31-a6fe-e67d1d08bfa2.jpg)
 
 
 
